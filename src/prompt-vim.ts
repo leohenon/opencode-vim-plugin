@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks"
 import { spawnSync } from "node:child_process"
 import type { Context, KeymapCommand } from "@opencode/plugin/tui/context"
 import { CliRenderEvents, RGBA, type KeyEvent, type TextareaRenderable } from "@opentui/core"
@@ -8,6 +9,8 @@ import { createVimState, type VimMode, type VimRegister } from "./vim/state"
 const PROMPT_RENDER_PATCH = Symbol("ocv-plugin.prompt.render.patch")
 
 type PromptRenderPatch = {
+  originalInsertText: TextareaLike["insertText"]
+  patchedInsertText: TextareaLike["insertText"]
   originalClear: TextareaLike["clear"]
   patchedClear: TextareaLike["clear"]
   originalPaste: TextareaLike["onPaste"]
@@ -312,6 +315,17 @@ export function createPromptVim(
   let lastPromptEditor: TextareaLike | undefined
   let onPromptEditorChange = (_previous: TextareaLike | undefined) => {}
   let onPromptClear = () => {}
+  let disposed = false
+  let pasteGeneration = 0
+  const pasteEdits = new AsyncLocalStorage<{ editor: TextareaLike; generation: number } | undefined>()
+  let lastPaste: ReturnType<typeof pasteEdits.getStore>
+  let pasteTail: { text: string; cursor: number } | undefined
+
+  function cancelPasteEdits() {
+    pasteGeneration++
+    lastPaste = undefined
+    pasteTail = undefined
+  }
 
   function currentPromptEditor() {
     // Dialogs and menus push non-base keymap modes.
@@ -324,6 +338,7 @@ export function createPromptVim(
     if (editor !== lastPromptEditor) {
       const previous = lastPromptEditor
       lastPromptEditor = editor
+      patchPromptEditor(editor)
       onPromptEditorChange(previous)
     }
     return editor
@@ -338,6 +353,7 @@ export function createPromptVim(
   const pasteLayoutTimers = new Set<ReturnType<typeof setTimeout>>()
 
   function refreshPasteLayout(editor: TextareaLike) {
+    if (disposed) return
     const timer = setTimeout(() => {
       pasteLayoutTimers.delete(timer)
       if (editor.isDestroyed) return
@@ -363,6 +379,36 @@ export function createPromptVim(
   function patchPromptEditor(editor: TextareaLike) {
     if (editor[PROMPT_RENDER_PATCH]) return
     prunePatchedEditors()
+    const originalInsertText = editor.insertText
+    let inserting = false
+    const patchedInsertText: TextareaLike["insertText"] = (...args) => {
+      const paste = pasteEdits.getStore()
+      if (!paste) lastPaste = undefined
+      if (
+        !paste || inserting || disposed || !input.enabled() || editor.isDestroyed ||
+        paste.editor !== editor || paste.generation !== pasteGeneration ||
+        editor !== lastPromptEditor || editor !== context.renderer.currentFocusedEditor
+      ) return originalInsertText.apply(editor, args)
+      const pre = { text: editor.plainText, cursor: editor.cursorOffset }
+      inserting = true
+      try {
+        return originalInsertText.apply(editor, args)
+      } finally {
+        inserting = false
+        if (paste.generation === pasteGeneration && !disposed) {
+          const post = { text: editor.plainText, cursor: editor.cursorOffset }
+          if (pre.text !== post.text) {
+            if (lastPaste !== paste || pasteTail?.text !== pre.text) {
+              state.commitEdit(pasteTail?.text === pre.text ? pasteTail : pre)
+              state.push(pre, post)
+            }
+            lastPaste = paste
+            pasteTail = post
+            if (state.isInsert() || state.isReplace()) state.beginEdit(post)
+          }
+        }
+      }
+    }
     const originalClear = editor.clear
     const patchedClear: TextareaLike["clear"] = (...args) => {
       originalClear.apply(editor, args)
@@ -375,7 +421,10 @@ export function createPromptVim(
         event.stopPropagation()
         return
       }
-      const result = originalPaste?.call(editor, event) as unknown
+      const result = pasteEdits.run(
+        input.enabled() ? { editor, generation: pasteGeneration } : undefined,
+        () => originalPaste?.call(editor, event) as unknown,
+      )
       if (typeof (result as PromiseLike<unknown> | undefined)?.then === "function") {
         void Promise.resolve(result).then(
           () => refreshPasteLayout(editor),
@@ -386,6 +435,8 @@ export function createPromptVim(
       }
     }
     editor[PROMPT_RENDER_PATCH] = {
+      originalInsertText,
+      patchedInsertText,
       originalClear,
       patchedClear,
       originalPaste,
@@ -395,6 +446,7 @@ export function createPromptVim(
       originalSelectionBg: editor.selectionBg,
       originalSelectionFg: editor.selectionFg,
     }
+    editor.insertText = patchedInsertText
     editor.clear = patchedClear
     editor.onPaste = patchedPaste
     patchedEditors.add(editor)
@@ -402,6 +454,7 @@ export function createPromptVim(
 
   function applyCursorStyle() {
     if (!input.enabled()) {
+      cancelPasteEdits()
       prunePatchedEditors()
       for (const editor of patchedEditors) {
         const patch = editor[PROMPT_RENDER_PATCH]
@@ -600,6 +653,7 @@ export function createPromptVim(
   })
 
   onPromptEditorChange = (previous) => {
+    cancelPasteEdits()
     const mode = state.mode()
     if (previous && (mode === "visual" || mode === "visual-line") && !previous.isDestroyed) previous.clearSelection()
     handler.cancelPending()
@@ -609,6 +663,7 @@ export function createPromptVim(
     syncStyle()
   }
   onPromptClear = () => {
+    cancelPasteEdits()
     handler.cancelPending()
     state.resetHistory()
     state.setMode(input.insertAfterSubmit ? "insert" : "normal")
@@ -628,7 +683,12 @@ export function createPromptVim(
   function runVimKey(event: KeyEvent) {
     const editor = promptEditor()
     if (!editor) return false
+    lastPaste = undefined
     const keyEvent = vimEvent(event)
+    if (state.isReplace() && keyEvent.name === "escape" && pasteTail?.text === editor.plainText) {
+      state.commitEdit(pasteTail)
+    }
+    if (!state.isInsert() && !state.isReplace()) pasteTail = undefined
     if ((state.isInsert() || state.isReplace()) && keyEvent.name === "return" && !hasModifier(keyEvent)) {
       if (input.enterSubmit) submitPrompt()
       else {
@@ -681,6 +741,9 @@ export function createPromptVim(
   syncStyle()
 
   function dispose() {
+    disposed = true
+    cancelPasteEdits()
+    pasteEdits.disable()
     context.renderer.off(CliRenderEvents.FOCUSED_EDITOR, syncStyle)
     context.renderer.keyInput.off("keypress", onComma)
     handler.cancelPending()
@@ -695,6 +758,7 @@ export function createPromptVim(
     for (const editor of patchedEditors) {
       const patch = editor[PROMPT_RENDER_PATCH]
       if (!patch) continue
+      if (editor.insertText === patch.patchedInsertText) editor.insertText = patch.originalInsertText
       if (editor.clear === patch.patchedClear) editor.clear = patch.originalClear
       if (editor.onPaste === patch.patchedPaste) editor.onPaste = patch.originalPaste
       delete editor[PROMPT_RENDER_PATCH]
