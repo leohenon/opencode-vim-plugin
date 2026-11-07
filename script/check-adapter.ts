@@ -629,6 +629,9 @@ for (const bind of [",", " , ", "ctrl+,", "ctrl+, ", "x,,y", "x, ,y"]) {
   const originalClear = editor.clear
   const originalSubmit = editor.submit
   const originalPaste = editor.onPaste
+  const originalInsertText = editor.insertText
+  const originalDeleteRange = editor.deleteRange
+  const originalSetText = editor.setText
   context.renderer.currentFocusedEditor = editor
   // Consumption is asserted via the run return value: void = consumed by the
   // plugin layer, false = fell through to the host.
@@ -700,9 +703,9 @@ for (const bind of [",", " , ", "ctrl+,", "ctrl+, ", "x,,y", "x, ,y"]) {
   assert(vimKey(layers, "@")() !== false, "empty @ should be handled")
   assert(editor.plainText === "@", "@ should enter insert mode and start host autocomplete")
   vimKey(layers, "escape")()
-  const originalInsertText = editor.insertText
+  const insertTextBeforeRecording = editor.insertText
   vimKey(layers, "i")()
-  assert(editor.insertText !== originalInsertText, "insert mode should install the repeat recorder")
+  assert(editor.insertText !== insertTextBeforeRecording, "insert mode should install the repeat recorder")
   assert(editor.cursorStyle?.style === "line", "enabled insert mode should use the Vim cursor style")
   toggle.run()
   assert(editor.showCursor === true, "disabling Vim should restore the prompt cursor visibility")
@@ -713,7 +716,9 @@ for (const bind of [",", " , ", "ctrl+,", "ctrl+, ", "x,,y", "x, ,y"]) {
   assert(editor.clear === originalClear, "prompt cleanup should restore patched clear")
   assert(editor.submit === originalSubmit, "prompt patching should leave submit unchanged")
   assert(editor.onPaste === originalPaste, "prompt cleanup should restore patched paste")
-  assert(editor.insertText === originalInsertText, "prompt cleanup should restore repeat recorder methods")
+  assert(editor.insertText === originalInsertText, "prompt cleanup should restore insertText")
+  assert(editor.deleteRange === originalDeleteRange, "prompt cleanup should restore deleteRange")
+  assert(editor.setText === originalSetText, "prompt cleanup should restore setText")
 }
 
 {
@@ -990,6 +995,221 @@ for (const [label, key, height, startRow, startOffset, expectedOffset] of [
   await new Promise((resolve) => setTimeout(resolve, 0))
   assert(renderRequests() === rendersBeforePaste + 1, "completed pastes should request exactly one render")
 }
+
+for (const scheduling of ["sync", "promise", "queued"]) {
+  for (const [before, after, history] of [
+    ["foo", "", ["", "foo", "fooBAR"]],
+    ["foo", "baz", ["", "foo", "fooBAR", "fooBARbaz"]],
+    ["", "", ["", "BAR"]],
+  ] as const) {
+    const { layers, context, cleanup } = await setup()
+    const editor: any = fakeTextarea()
+    let pasteQueue = Promise.resolve()
+    editor.onPaste = () => {
+      if (scheduling === "sync") editor.insertText("BAR")
+      else {
+        pasteQueue = pasteQueue.then(async () => {
+          await Promise.resolve()
+          editor.insertText("BAR")
+        })
+        if (scheduling === "promise") return pasteQueue
+      }
+    }
+    context.renderer.currentFocusedEditor = editor
+
+    vimKey(layers, "i")()
+    if (before) editor.insertText(before)
+    editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+    if (scheduling !== "sync") await pasteQueue
+    if (after) editor.insertText(after)
+    vimKey(layers, "escape")()
+    assert(editor.plainText === history.at(-1), `${scheduling} paste should preserve surrounding typing`)
+    for (const expected of history.slice(0, -1).reverse()) {
+      vimKey(layers, "u")()
+      assert(editor.plainText === expected, `${scheduling} paste undo should restore ${JSON.stringify(expected)}`)
+    }
+    vimKey(layers, "u")()
+    assert(editor.plainText === "", `${scheduling} paste must not create extra undo entries`)
+    for (const expected of history.slice(1)) {
+      vimKey(layers, "ctrl+r")()
+      assert(editor.plainText === expected, `${scheduling} paste redo should restore ${JSON.stringify(expected)}`)
+    }
+    for (const _ of history.slice(1)) vimKey(layers, "u")()
+    vimKey(layers, ".")()
+    assert(editor.plainText === history.at(-1), `${scheduling} paste dot repeat should replay the full session`)
+    await cleanup?.()
+  }
+}
+
+{
+  const { layers, context, cleanup } = await setup()
+  const editor: any = fakeTextarea()
+  let resolveHostPaste: (() => void) | undefined
+  editor.onPaste = async () => {
+    await new Promise<void>((resolve) => {
+      resolveHostPaste = resolve
+    })
+    editor.insertText("BAR")
+  }
+  context.renderer.currentFocusedEditor = editor
+
+  vimKey(layers, "i")()
+  editor.insertText("foo")
+  editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+  vimKey(layers, "escape")()
+  vimKey(layers, "u")()
+  assert(editor.plainText === "", "undo before the host paste settles should remove the earlier typing")
+  resolveHostPaste?.()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(editor.plainText === "BAR", "the settled host paste should land in the prompt")
+  vimKey(layers, "u")()
+  assert(editor.plainText === "", "the settled paste should be its own undo entry")
+  await cleanup?.()
+}
+
+for (const queued of [false, true]) {
+  const { layers, context, cleanup } = await setup()
+  const editor: any = fakeTextarea()
+  let pasteQueue = Promise.resolve()
+  let pasteText = "XY"
+  editor.onPaste = () => {
+    const text = pasteText
+    const insert = () => { for (const char of text) editor.insertText(char) }
+    if (queued) void (pasteQueue = pasteQueue.then(insert))
+    else insert()
+  }
+  context.renderer.currentFocusedEditor = editor
+
+  vimKey(layers, "i")()
+  editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+  pasteText = "Z"
+  editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+  if (queued) await pasteQueue
+  vimKey(layers, "escape")()
+  vimKey(layers, "u")()
+  assert(editor.plainText === "XY", "consecutive pastes should each undo separately")
+  vimKey(layers, "u")()
+  assert(editor.plainText === "", "multiple insertions within one paste should undo together")
+  vimKey(layers, "ctrl+r")()
+  assert(editor.plainText === "XY", "redo should restore every insertion within a paste")
+  await cleanup?.()
+}
+
+for (const initialMode of ["normal", "insert"]) {
+  const { layers, context, cleanup } = await setup({ initial_mode: initialMode })
+  const editor: any = fakeTextarea()
+  const originalInsertText = editor.insertText
+  const originalDeleteRange = editor.deleteRange
+  const originalSetText = editor.setText
+  let pasteQueue = Promise.resolve()
+  editor.onPaste = () => {
+    void (pasteQueue = pasteQueue.then(() => { editor.insertText("BAR") }))
+  }
+  context.renderer.currentFocusedEditor = editor
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR)
+  if (initialMode === "normal") vimKey(layers, "i")()
+  editor.insertText("foo")
+  editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+  await pasteQueue
+  vimKey(layers, "backspace")()
+  editor.plainText = editor.plainText.slice(0, -1)
+  editor.cursorOffset--
+  vimKey(layers, "escape")()
+  vimKey(layers, "u")()
+  assert(editor.plainText === "fooBAR", "native deletion after paste should undo independently")
+  vimKey(layers, "u")()
+  assert(editor.plainText === "foo", "undo after native deletion should still isolate the paste")
+  await cleanup?.()
+  assert(editor.insertText === originalInsertText, "cleanup should restore insertText in either initial mode")
+  assert(editor.deleteRange === originalDeleteRange, "cleanup should restore deleteRange in either initial mode")
+  assert(editor.setText === originalSetText, "cleanup should restore setText in either initial mode")
+}
+
+for (const reject of [false, true]) {
+  const { layers, context, cleanup } = await setup()
+  const editor: any = fakeTextarea()
+  editor.onPaste = async () => {
+    await Promise.resolve()
+    if (reject) throw new Error("paste failed")
+  }
+  context.renderer.currentFocusedEditor = editor
+
+  vimKey(layers, "i")()
+  editor.insertText("foo")
+  editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  editor.insertText("bar")
+  vimKey(layers, "escape")()
+  vimKey(layers, "u")()
+  assert(editor.plainText === "", "a non-mutating paste must not split the surrounding typing")
+  await cleanup?.()
+}
+
+for (const queued of [false, true]) {
+  const { layers, context, cleanup } = await setup()
+  const editor: any = fakeTextarea()
+  editor.setText("abcd")
+  editor.cursorOffset = 0
+  let pasteQueue = Promise.resolve()
+  editor.onPaste = () => {
+    if (queued) void (pasteQueue = pasteQueue.then(() => { editor.insertText("PASTE") }))
+    else editor.insertText("PASTE")
+  }
+  context.renderer.currentFocusedEditor = editor
+
+  vimKey(layers, "shift+r")()
+  vimKey(layers, "x")()
+  editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+  await pasteQueue
+  vimKey(layers, "escape")()
+  vimKey(layers, "u")()
+  assert(editor.plainText === "xbcd", "replace-mode Escape after paste must not add a cursor-only undo entry")
+  vimKey(layers, "u")()
+  assert(editor.plainText === "abcd", "replacement typing before paste should retain its own undo entry")
+  await cleanup?.()
+}
+
+{
+  const { layers, context, cleanup } = await setup()
+  const first: any = fakeTextarea()
+  let resolveHostPaste: (() => void) | undefined
+  first.onPaste = async () => {
+    await new Promise<void>((resolve) => { resolveHostPaste = resolve })
+    first.insertText("BAR")
+  }
+  context.renderer.currentFocusedEditor = first
+  vimKey(layers, "i")()
+  first.insertText("foo")
+  first.onPaste({ preventDefault() {}, stopPropagation() {} })
+
+  const second: any = fakeTextarea()
+  second.setText("new draft")
+  context.renderer.currentFocusedEditor = second
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR)
+  vimKey(layers, "escape")()
+  resolveHostPaste?.()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  vimKey(layers, "u")()
+  assert(second.plainText === "new draft", "an old editor's pending paste must not write to the new editor's history")
+  await cleanup?.()
+}
+
+{
+  const { layers, context, cleanup } = await setup()
+  const editor: any = fakeTextarea()
+  let resolveHostPaste: (() => void) | undefined
+  editor.onPaste = () => new Promise<void>((resolve) => { resolveHostPaste = resolve })
+  context.renderer.currentFocusedEditor = editor
+  vimKey(layers, "i")()
+  editor.onPaste({ preventDefault() {}, stopPropagation() {} })
+  await cleanup?.()
+  let renders = 0
+  context.renderer.requestRender = () => renders++
+  resolveHostPaste?.()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(renders === 0, "a pending paste must not request renders after cleanup")
+}
+
 
 {
   const { layers, context } = await setup({ initial_mode: "normal", vim_langmap: { р: "h" } })
