@@ -313,6 +313,8 @@ export function createPromptVim(
   },
 ) {
   let lastPromptEditor: TextareaLike | undefined
+  let lastPromptKey: string | undefined
+  let refocusingPrompt = false
   let onPromptEditorChange = (_previous: TextareaLike | undefined) => {}
   let onPromptClear = () => {}
   let disposed = false
@@ -330,14 +332,40 @@ export function createPromptVim(
   function currentPromptEditor() {
     // Dialogs and menus push non-base keymap modes.
     if (context.keymap.mode.current() !== "base") return
-    const route = context.ui.router.current().type
-    if (route !== "home" && route !== "session") return
-    const editor = context.renderer.currentFocusedEditor
+    const route = context.ui.router.current()
+    if (route.type !== "home" && route.type !== "session") return
+    const key = route.type === "session" ? `session:${route.sessionID}` : "home"
+    let editor = context.renderer.currentFocusedEditor
     if (!isTextareaLike(editor)) return
     if (editor.focused === false) return
+    // OpenCode can mount two prompt renderables for the same prompt (seen on the
+    // new-session route) and flap focus onto the collapsed, zero-size duplicate.
+    // The native block cursor follows the focused renderable, so it lands on the
+    // invisible one and disappears; the switches also churn Vim state. When focus
+    // is on a collapsed renderable but the laid-out one for this same prompt is
+    // known, keep using it and pull focus back so the cursor and Vim stay put.
+    if (
+      !refocusingPrompt &&
+      (editor.width <= 0 || editor.height <= 0) &&
+      key === lastPromptKey &&
+      lastPromptEditor &&
+      lastPromptEditor !== editor &&
+      !lastPromptEditor.isDestroyed &&
+      lastPromptEditor.width > 0 &&
+      lastPromptEditor.height > 0
+    ) {
+      refocusingPrompt = true
+      try {
+        lastPromptEditor.focus()
+      } finally {
+        refocusingPrompt = false
+      }
+      return lastPromptEditor
+    }
     if (editor !== lastPromptEditor) {
       const previous = lastPromptEditor
       lastPromptEditor = editor
+      lastPromptKey = key
       patchPromptEditor(editor)
       onPromptEditorChange(previous)
     }
