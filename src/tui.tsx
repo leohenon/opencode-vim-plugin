@@ -359,15 +359,19 @@ function KeymapSetup(props: {
 }) {
   const { context, options, prompt, toggle } = props
   onMount(prompt.applyCursorStyle)
+  // keymapMode is "base" normally and "autocomplete" when the host has left a
+  // stale autocomplete mode behind, see the note above keymapMode in prompt-vim.ts.
+  // Every layer that runs against the prompt has to follow it, otherwise the host's
+  // stale mode scopes that layer out and the keys never reach Vim.
   context.keymap.layer(() => ({
-    mode: "base",
+    mode: prompt.keymapMode(),
     priority: 100,
     commands: prompt.vimCommands,
   }))
   if (options.toggleKey) {
     try {
       context.keymap.layer(() => ({
-        mode: "base",
+        mode: prompt.keymapMode(),
         priority: 100,
         commands: [{ bind: options.toggleKey!, run: () => toggle() }],
       }))
@@ -382,7 +386,7 @@ function KeymapSetup(props: {
   if (normalBindings.length > 0) {
     try {
       context.keymap.layer(() => ({
-        mode: "base",
+        mode: prompt.keymapMode(),
         priority: 200,
         enabled: () => prompt.active() && prompt.mode() === "normal",
         commands: normalBindings.map((binding) => ({
