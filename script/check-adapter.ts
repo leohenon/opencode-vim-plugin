@@ -1357,6 +1357,118 @@ for (const queued of [false, true]) {
   await cleanup?.()
 }
 
+{
+  // The deferred refocus must re-check its own premise. The microtask runs after
+  // the host's transition, so the route can have moved on in the meantime: the
+  // pending target is then the previous prompt, and focusing it would be a plain
+  // focus steal rather than a workaround.
+  const { layers, context, cleanup } = await setup()
+  const laidOut: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = laidOut
+  vimKey(layers, "i")()
+
+  // Focus flaps onto the collapsed duplicate, which queues the refocus.
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, laidOut)
+  // The user navigates away before the microtask gets its turn.
+  context.ui.router.current = () => ({ type: "session", sessionID: "ses_b" })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(focusCalls === 0, "a prompt from a route the user has left must not be refocused")
+  assert(context.renderer.currentFocusedEditor === collapsed, "the plugin must leave focus where the new route put it")
+  await cleanup?.()
+}
+
+{
+  // Same re-check for the plugin's own state: if Vim is switched off while the
+  // refocus is pending, the plugin no longer owns the prompt and must not move
+  // focus at all.
+  const { layers, context, cleanup } = await setup()
+  const laidOut: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = laidOut
+  vimKey(layers, "i")()
+
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, laidOut)
+  // The user toggles Vim off before the microtask gets its turn.
+  const toggle = layers.flatMap((layer) => layer.commands ?? []).find((command: any) => command.id === "ocv-plugin.toggle")
+  toggle.run()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(focusCalls === 0, "a disabled plugin must not refocus the prompt")
+  await cleanup?.()
+}
+
+{
+  // Prompt identity on its own, not just the route: navigate away and back inside
+  // the microtask window and the route key matches again, but the plugin has
+  // adopted a different renderable for the prompt in the meantime. A refocus
+  // queued for the old one is stale and must not fire.
+  const { layers, context, cleanup } = await setup()
+  const first: any = fakeTextarea()
+  const second: any = fakeTextarea()
+  const third: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [first, second, third, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = first
+  vimKey(layers, "i")()
+
+  // Flap onto the collapsed duplicate queues a refocus onto `first`.
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, first)
+  // The user leaves and comes back before the microtask gets its turn, so the
+  // plugin adopts a different renderable for the same prompt key.
+  context.ui.router.current = () => ({ type: "session", sessionID: "ses_b" })
+  context.renderer.currentFocusedEditor = second
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, second, collapsed)
+  vimKey(layers, "i")()
+  context.ui.router.current = () => ({ type: "home" })
+  context.renderer.currentFocusedEditor = third
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, third, second)
+  vimKey(layers, "i")()
+  // The host is between renderables when the microtask runs, so only the prompt
+  // identity check can stop the stale refocus.
+  context.renderer.currentFocusedEditor = null
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(focusCalls === 0, "a refocus queued for a superseded renderable must not fire")
+  await cleanup?.()
+}
+
 for (const dialogOpen of [false, true]) {
   const { layers, context, cleanup } = await setup()
   const editors: any[] = [fakeTextarea(), fakeTextarea()]

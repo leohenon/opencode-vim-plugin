@@ -329,12 +329,19 @@ export function createPromptVim(
     pasteTail = undefined
   }
 
+  // Which prompt the user is on. Two renderables can share one key, which is what
+  // the focus workaround below keys off.
+  function currentPromptKey() {
+    const route = context.ui.router.current()
+    if (route.type !== "home" && route.type !== "session") return
+    return route.type === "session" ? `session:${route.sessionID}` : "home"
+  }
+
   function currentPromptEditor() {
     // Dialogs and menus push non-base keymap modes.
     if (context.keymap.mode.current() !== "base") return
-    const route = context.ui.router.current()
-    if (route.type !== "home" && route.type !== "session") return
-    const key = route.type === "session" ? `session:${route.sessionID}` : "home"
+    const key = currentPromptKey()
+    if (!key) return
     let editor = context.renderer.currentFocusedEditor
     if (!isTextareaLike(editor)) return
     if (editor.focused === false) return
@@ -356,7 +363,7 @@ export function createPromptVim(
     ) {
       // Keep using the laid-out renderable for this call so Vim state and the
       // cursor stay put, and ask for focus to follow once the host is done.
-      queuePromptRefocus(lastPromptEditor)
+      queuePromptRefocus(lastPromptEditor, key)
       return lastPromptEditor
     }
     if (editor !== lastPromptEditor) {
@@ -379,12 +386,21 @@ export function createPromptVim(
   //
   // Nothing here may read or write host keymap or focus state synchronously: a
   // host call that re-enters the keymap or the focus transition breaks the same way.
-  function queuePromptRefocus(target: TextareaLike) {
+  // The microtask is outside the emit, so it can re-read the host state to confirm
+  // this is still the same prompt the plugin is serving.
+  function queuePromptRefocus(target: TextareaLike, key: string) {
     if (refocusQueued) return
     refocusQueued = true
     queueMicrotask(() => {
       refocusQueued = false
       if (disposed) return
+      // The route may have changed and a new prompt adopted since this was queued.
+      // Focusing the previous prompt then would be a plain focus steal, not a
+      // workaround, so both the prompt identity and the route must still match.
+      if (lastPromptEditor !== target) return
+      if (currentPromptKey() !== key) return
+      // Vim may have been turned off while this was pending.
+      if (!input.enabled()) return
       if (target.isDestroyed) return
       if (target.width <= 0 || target.height <= 0) return
       const focused = context.renderer.currentFocusedEditor as TextareaLike | undefined
