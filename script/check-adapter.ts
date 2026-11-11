@@ -272,10 +272,41 @@ function fakeEvent(name: string, opts: { shift?: boolean; sequence?: string } = 
 
 function fakeContext(options: unknown) {
   const layers: any[] = []
-  const layerFactories: Array<() => any> = []
+  // The host documents layer() as "Creates a reactive keymap layer. ... The factory
+  // must be pure. It runs once untracked for initial command-shape validation, then
+  // reactively." Model that here so a test can prove a registered layer follows the
+  // keymap state on its own, instead of calling the factory by hand. Only the two
+  // sources the plugin reads are tracked.
+  let keymapReader: (() => void) | undefined
+  const keymapSubscribers = new Set<() => void>()
+  const trackKeymap = <T>(read: () => T) => {
+    if (keymapReader) keymapSubscribers.add(keymapReader)
+    return read()
+  }
+  const notifyKeymap = () => {
+    for (const subscriber of [...keymapSubscribers]) subscriber()
+  }
+  let keymapMode = "base"
+  let keymapCommands: any[] = []
   // Mutable so a test can model the host pushing a keymap mode and mounting or
-  // unmounting the autocomplete popup's own commands.
-  const keymapState = { mode: "base", commands: [] as any[] }
+  // unmounting the autocomplete popup's own commands. Assigning notifies, so the
+  // registered layers update the way the host's would.
+  const keymapState = {
+    get mode() {
+      return keymapMode
+    },
+    set mode(next: string) {
+      keymapMode = next
+      notifyKeymap()
+    },
+    get commands() {
+      return keymapCommands
+    },
+    set commands(next: any[]) {
+      keymapCommands = next
+      notifyKeymap()
+    },
+  }
   const slots: any[] = []
   const dispatched: string[] = []
   const toasts: any[] = []
@@ -300,13 +331,38 @@ function fakeContext(options: unknown) {
     markdown: { registerCodeBlockRenderer: () => () => {} },
     keymap: {
       layer(input: () => any) {
-        const layer = input()
-        for (const command of layer.commands ?? []) if (command.bind) parseBind(command.bind)
+        // Untracked pass first, like the host: validate the command shape without
+        // subscribing, so a factory whose shape is wrong still throws here.
+        const outer = keymapReader
+        keymapReader = undefined
+        let shape: any
+        try {
+          shape = input()
+        } finally {
+          keymapReader = outer
+        }
+        for (const command of shape.commands ?? []) if (command.bind) parseBind(command.bind)
+        // The registered object is the same one all along and is updated in place,
+        // so a test holding a reference to it sees the reactive update.
+        const layer: any = {}
+        const apply = () => {
+          const previous = keymapReader
+          keymapReader = apply
+          let next: any
+          try {
+            next = input()
+          } finally {
+            keymapReader = previous
+          }
+          for (const key of Object.keys(layer)) delete layer[key]
+          Object.assign(layer, next)
+        }
+        apply()
         layers.push(layer)
-        layerFactories.push(input)
         const release = () => {
           const index = layers.indexOf(layer)
           if (index !== -1) layers.splice(index, 1)
+          keymapSubscribers.delete(apply)
         }
         onCleanup(release)
         return release
@@ -315,10 +371,10 @@ function fakeContext(options: unknown) {
         dispatched.push(id)
       },
       shortcuts: () => [],
-      commands: () => keymapState.commands,
+      commands: () => trackKeymap(() => keymapState.commands),
       pending: () => [],
       active: () => [],
-      mode: { current: () => keymapState.mode, push: () => () => {} },
+      mode: { current: () => trackKeymap(() => keymapState.mode), push: () => () => {} },
     },
     storage: {
       store(_key: string, { initial }: { initial: any }) {
@@ -360,7 +416,7 @@ function fakeContext(options: unknown) {
       },
     },
   }
-  return { context, layers, layerFactories, keymapState, slots, dispatched, toasts, storageSetters }
+  return { context, layers, keymapState, slots, dispatched, toasts, storageSetters }
 }
 
 async function setup(options: unknown = { initial_mode: "normal" }) {
@@ -1312,7 +1368,7 @@ for (const queued of [false, true]) {
   // mode silently swallows every key: typing falls through to the host and escape
   // never reaches the Vim handler, while the plugin still believes it is in normal
   // mode.
-  const { layers, layerFactories, keymapState, context, cleanup } = await setup()
+  const { layers, keymapState, context, cleanup } = await setup()
   const editor: any = fakeTextarea()
   editor.plainText = "abc"
   context.renderer.currentFocusedEditor = editor
@@ -1321,28 +1377,32 @@ for (const queued of [false, true]) {
 
   const vimIndex = layers.findIndex((layer) => (layer.commands ?? []).some((command: any) => command.id === "ocv-plugin.key"))
   assert(vimIndex !== -1, "the vim key command should be registered")
-  // Model the host re-running the reactive layer factory when the mode changes.
-  const remode = () => (layers[vimIndex] = layerFactories[vimIndex]())
+  // Nothing below calls a factory. The keymap mock re-runs a layer's factory when a
+  // source that factory read changes, exactly as the host documents layer(), so these
+  // assertions only hold if the plugin's layer really tracks the popup's commands.
+  const registered = layers.length
 
   // Popup genuinely open: the host owns the keys and the plugin stays out of it.
   keymapState.mode = "autocomplete"
   keymapState.commands = [{ id: "prompt.autocomplete.select" }]
-  assert(remode().mode === "base", "the plugin must stay out of a live autocomplete popup")
+  assert(layers[vimIndex].mode === "base", "the plugin must stay out of a live autocomplete popup")
   assert(!layers.some((layer) => layer.mode === "autocomplete" && (layer.commands ?? []).some((command: any) => command.id === "ocv-plugin.key")),
     "the plugin must not claim keys while the popup is open")
 
   // Popup unmounted but the mode never popped: the plugin must reclaim the keys.
+  // Only the command list changed, so this is the stale mode the workaround is for.
   keymapState.commands = []
-  assert(remode().mode === "autocomplete", "the plugin must reclaim keys from a stale autocomplete mode")
+  assert(layers[vimIndex].mode === "autocomplete", "the plugin must reclaim keys from a stale autocomplete mode")
   assert(vimKey(layers, "x", "autocomplete")() !== false, "the plugin must handle keys in a stale autocomplete mode")
 
   // A real dialog mode is still the host's, with or without popup commands.
   keymapState.mode = "dialog"
-  assert(remode().mode === "base", "the plugin must not claim keys from a dialog keymap mode")
+  assert(layers[vimIndex].mode === "base", "the plugin must not claim keys from a dialog keymap mode")
 
   // And it returns to base once the host pops the stale mode.
   keymapState.mode = "base"
-  assert(remode().mode === "base", "the plugin should return to the base layer once the host pops the mode")
+  assert(layers[vimIndex].mode === "base", "the plugin should return to the base layer once the host pops the mode")
+  assert(layers.length === registered, "the plugin must update its layer in place rather than register a new one")
   await cleanup?.()
 }
 
