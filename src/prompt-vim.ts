@@ -329,9 +329,61 @@ export function createPromptVim(
     pasteTail = undefined
   }
 
+  // Workaround for https://github.com/anomalyco/opencode/issues/63267.
+  //
+  // The host pushes an "autocomplete" keymap mode while the @ or / popup is open
+  // and pops it when the popup closes. Switching session tabs with the popup open
+  // unmounts the popup but leaves the mode pushed, so coming back to the home
+  // route restores a mode with no popup behind it. The plugin's Vim commands live
+  // in the "base" layer and the host scopes base layers out whenever a non-base
+  // mode is current, so that stale mode silently locks Vim out of every key:
+  // typing falls through to the host and escape never reaches the Vim handler,
+  // while the plugin still believes it is in normal mode. Escape cannot recover
+  // it, and dispatching the host's own hide command does not pop the mode either.
+  //
+  // The fix is to trust the mode only while the popup's own commands are actually
+  // reachable, and register the Vim commands in the stale mode so the keys keep
+  // arriving. Once the host pops the mode this could go back to a plain "base"
+  // check, but the reachability test is also the more defensive reading of the
+  // keymap API, so it is worth keeping either way.
+  //
+  // That reachability check must not run inside the FOCUSED_EDITOR emit or the key
+  // handler: reading the reachable command list there re-enters the host's keymap
+  // mid-transition and the popup never mounts. So keymapMode(), which only the
+  // keymap layer factory runs in, publishes the answer and the guards read the
+  // cached value. The default assumes the host owns the keys, matching the old
+  // behavior, so a factory that has not run yet can never hand the keys back.
+  let autocompleteStale = false
+
+  function autocompleteCommandsReachable() {
+    try {
+      return context.keymap
+        .commands()
+        .some((command) => String(command.id ?? "").startsWith("prompt.autocomplete"))
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * The keymap mode the plugin's Vim commands should be registered in. Reads the
+   * host's reachable command list, so only the keymap layer factory may call it.
+   */
+  function keymapMode() {
+    autocompleteStale = context.keymap.mode.current() === "autocomplete" && !autocompleteCommandsReachable()
+    return autocompleteStale ? "autocomplete" : "base"
+  }
+
+  function hostOwnsKeys() {
+    const mode = context.keymap.mode.current()
+    if (mode === "base") return false
+    if (mode === "autocomplete") return !autocompleteStale
+    return true
+  }
+
   function currentPromptEditor() {
     // Dialogs and menus push non-base keymap modes.
-    if (context.keymap.mode.current() !== "base") return
+    if (hostOwnsKeys()) return
     const route = context.ui.router.current()
     if (route.type !== "home" && route.type !== "session") return
     const key = route.type === "session" ? `session:${route.sessionID}` : "home"
@@ -815,6 +867,7 @@ export function createPromptVim(
     isVisualLine: state.isVisualLine,
     mode: state.mode,
     setMode: state.setMode,
+    keymapMode,
     vimCommands,
   }
 }
