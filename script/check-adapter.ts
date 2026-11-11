@@ -1248,6 +1248,31 @@ for (const queued of [false, true]) {
   collapsed.height = 0
   collapsed.cursorStyle = undefined
 
+  // Model the host faithfully: focus() moves currentFocusedEditor and emits
+  // FOCUSED_EDITOR from *inside* its own changeFocus, so the emit is re-entrant
+  // for the host. The native block cursor follows host focus, so restoring focus
+  // to the laid-out prompt is what keeps the cursor visible; without this the
+  // assertions below would pass even with focus() removed.
+  let inHostFocusTransition = false
+  let focusDuringHostTransition = 0
+  const setHostFocus = (next: any) => {
+    const previous = context.renderer.currentFocusedEditor
+    if (previous === next) return
+    context.renderer.currentFocusedEditor = next
+    inHostFocusTransition = true
+    try {
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, next, previous)
+    } finally {
+      inHostFocusTransition = false
+    }
+  }
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      if (inHostFocusTransition) focusDuringHostTransition += 1
+      setHostFocus(editor)
+    }
+  }
+
   // The prompt first settles on the laid-out editor, which becomes the known one.
   context.renderer.currentFocusedEditor = laidOut
   vimKey(layers, "i")()
@@ -1255,24 +1280,58 @@ for (const queued of [false, true]) {
   vimKey(layers, "escape")()
   assert(laidOut.plainText === "abc", "the laid-out prompt should hold the typed draft")
 
-  // Model the host: focus() must move currentFocusedEditor and emit FOCUSED_EDITOR,
-  // so the test pins the production focus() call. The native block cursor follows
-  // host focus, so restoring it to the laid-out prompt is what keeps the cursor
-  // visible; without this the assertions below would pass even with focus() removed.
-  laidOut.focus = () => {
-    const previous = context.renderer.currentFocusedEditor
-    context.renderer.currentFocusedEditor = laidOut
-    context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, laidOut, previous)
-  }
-
   // Focus flaps onto the collapsed duplicate for the SAME prompt (home route).
-  context.renderer.currentFocusedEditor = collapsed
-  vimKey(layers, "u")()
+  // This goes through the host's changeFocus, so the plugin sees the flap from
+  // inside the FOCUSED_EDITOR emit, exactly as it does in production.
+  setHostFocus(collapsed)
+  await new Promise((resolve) => setTimeout(resolve, 0))
   assert(context.renderer.currentFocusedEditor === laidOut, "the plugin must restore host focus to the laid-out prompt")
+  assert(focusDuringHostTransition === 0, "the plugin must not call focus() inside the host's FOCUSED_EDITOR emit")
+  assert(laidOut.plainText === "abc", "the laid-out prompt should keep its draft across a host focus-war")
+
+  // Edits keep landing on the laid-out prompt, never the collapsed duplicate.
+  // Still in normal mode, so "u" is undo.
+  vimKey(layers, "u")()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   assert(laidOut.plainText === "", "undo must survive a host focus-war onto a collapsed duplicate")
   assert(collapsed.plainText === "", "the collapsed duplicate must never receive edits")
   assert(laidOut.cursorStyle?.style === "block" && laidOut.showCursor === true, "the block cursor must stay on the laid-out prompt")
   assert(collapsed.cursorStyle === undefined, "the collapsed duplicate must not receive the cursor style")
+  await cleanup?.()
+}
+
+{
+  // Workaround for host behavior: the host normally moves focus back to the
+  // laid-out prompt on its own. When it does, the plugin must stay out of the way:
+  // grabbing focus back from a renderable that is already laid out is what stranded
+  // the @ or / autocomplete popup on an invisible 0x0 buffer, so keystrokes
+  // vanished and Enter submitted text the prompt never displayed.
+  const { layers, context, cleanup } = await setup()
+  const laidOut: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = laidOut
+  vimKey(layers, "i")()
+
+  // Host flaps onto the collapsed duplicate, then corrects itself right away.
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, laidOut)
+  context.renderer.currentFocusedEditor = laidOut
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, laidOut, collapsed)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(context.renderer.currentFocusedEditor === laidOut, "the host's own correction should be left alone")
+  assert(focusCalls === 0, "the plugin must not fight a host that already restored focus")
   await cleanup?.()
 }
 
