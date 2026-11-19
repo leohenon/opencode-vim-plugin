@@ -3,7 +3,7 @@
 import { Plugin } from "@opencode/plugin/tui"
 import type { Context } from "@opencode/plugin/tui/context"
 import { TextAttributes, type TextRenderable } from "@opentui/core"
-import { createEffect, createRoot, createSignal, onCleanup, onMount, type Accessor } from "solid-js"
+import { createEffect, createMemo, createRoot, createSignal, onCleanup, onMount, type Accessor } from "solid-js"
 import { createPromptVim } from "./prompt-vim"
 const PLUGIN_ID = "ocv-plugin"
 const COMMAND_TOGGLE = "ocv-plugin.toggle"
@@ -359,15 +359,21 @@ function KeymapSetup(props: {
 }) {
   const { context, options, prompt, toggle } = props
   onMount(prompt.applyCursorStyle)
+  // Only a mode change should rebuild these layers. Older hosts rebuild commands()
+  // on every layer registration, so reading it directly in a factory loops forever.
+  // The memo also publishes the stale-mode cache used by the key/focus guards.
+  const keymapMode = createMemo(prompt.keymapMode)
+  // Every prompt layer must follow a stale autocomplete mode, otherwise the host
+  // scopes it out and the keys never reach Vim. See prompt-vim.ts for the workaround.
   context.keymap.layer(() => ({
-    mode: "base",
+    mode: keymapMode(),
     priority: 100,
     commands: prompt.vimCommands,
   }))
   if (options.toggleKey) {
     try {
       context.keymap.layer(() => ({
-        mode: "base",
+        mode: keymapMode(),
         priority: 100,
         commands: [{ bind: options.toggleKey!, run: () => toggle() }],
       }))
@@ -382,7 +388,7 @@ function KeymapSetup(props: {
   if (normalBindings.length > 0) {
     try {
       context.keymap.layer(() => ({
-        mode: "base",
+        mode: keymapMode(),
         priority: 200,
         enabled: () => prompt.active() && prompt.mode() === "normal",
         commands: normalBindings.map((binding) => ({
