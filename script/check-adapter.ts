@@ -1248,6 +1248,31 @@ for (const queued of [false, true]) {
   collapsed.height = 0
   collapsed.cursorStyle = undefined
 
+  // Model the host faithfully: focus() moves currentFocusedEditor and emits
+  // FOCUSED_EDITOR from *inside* its own changeFocus, so the emit is re-entrant
+  // for the host. The native block cursor follows host focus, so restoring focus
+  // to the laid-out prompt is what keeps the cursor visible; without this the
+  // assertions below would pass even with focus() removed.
+  let inHostFocusTransition = false
+  let focusDuringHostTransition = 0
+  const setHostFocus = (next: any) => {
+    const previous = context.renderer.currentFocusedEditor
+    if (previous === next) return
+    context.renderer.currentFocusedEditor = next
+    inHostFocusTransition = true
+    try {
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, next, previous)
+    } finally {
+      inHostFocusTransition = false
+    }
+  }
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      if (inHostFocusTransition) focusDuringHostTransition += 1
+      setHostFocus(editor)
+    }
+  }
+
   // The prompt first settles on the laid-out editor, which becomes the known one.
   context.renderer.currentFocusedEditor = laidOut
   vimKey(layers, "i")()
@@ -1255,24 +1280,58 @@ for (const queued of [false, true]) {
   vimKey(layers, "escape")()
   assert(laidOut.plainText === "abc", "the laid-out prompt should hold the typed draft")
 
-  // Model the host: focus() must move currentFocusedEditor and emit FOCUSED_EDITOR,
-  // so the test pins the production focus() call. The native block cursor follows
-  // host focus, so restoring it to the laid-out prompt is what keeps the cursor
-  // visible; without this the assertions below would pass even with focus() removed.
-  laidOut.focus = () => {
-    const previous = context.renderer.currentFocusedEditor
-    context.renderer.currentFocusedEditor = laidOut
-    context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, laidOut, previous)
-  }
-
   // Focus flaps onto the collapsed duplicate for the SAME prompt (home route).
-  context.renderer.currentFocusedEditor = collapsed
-  vimKey(layers, "u")()
+  // This goes through the host's changeFocus, so the plugin sees the flap from
+  // inside the FOCUSED_EDITOR emit, exactly as it does in production.
+  setHostFocus(collapsed)
+  await new Promise((resolve) => setTimeout(resolve, 0))
   assert(context.renderer.currentFocusedEditor === laidOut, "the plugin must restore host focus to the laid-out prompt")
+  assert(focusDuringHostTransition === 0, "the plugin must not call focus() inside the host's FOCUSED_EDITOR emit")
+  assert(laidOut.plainText === "abc", "the laid-out prompt should keep its draft across a host focus-war")
+
+  // Edits keep landing on the laid-out prompt, never the collapsed duplicate.
+  // Still in normal mode, so "u" is undo.
+  vimKey(layers, "u")()
+  await new Promise((resolve) => setTimeout(resolve, 0))
   assert(laidOut.plainText === "", "undo must survive a host focus-war onto a collapsed duplicate")
   assert(collapsed.plainText === "", "the collapsed duplicate must never receive edits")
   assert(laidOut.cursorStyle?.style === "block" && laidOut.showCursor === true, "the block cursor must stay on the laid-out prompt")
   assert(collapsed.cursorStyle === undefined, "the collapsed duplicate must not receive the cursor style")
+  await cleanup?.()
+}
+
+{
+  // Workaround for host behavior: the host normally moves focus back to the
+  // laid-out prompt on its own. When it does, the plugin must stay out of the way:
+  // grabbing focus back from a renderable that is already laid out is what stranded
+  // the @ or / autocomplete popup on an invisible 0x0 buffer, so keystrokes
+  // vanished and Enter submitted text the prompt never displayed.
+  const { layers, context, cleanup } = await setup()
+  const laidOut: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = laidOut
+  vimKey(layers, "i")()
+
+  // Host flaps onto the collapsed duplicate, then corrects itself right away.
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, laidOut)
+  context.renderer.currentFocusedEditor = laidOut
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, laidOut, collapsed)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(context.renderer.currentFocusedEditor === laidOut, "the host's own correction should be left alone")
+  assert(focusCalls === 0, "the plugin must not fight a host that already restored focus")
   await cleanup?.()
 }
 
@@ -1295,6 +1354,118 @@ for (const queued of [false, true]) {
   assert(vimKey(layers, "x")() !== false, "a collapsed editor on a new route is adopted, not fought")
   assert(otherSession.plainText === "eep", "the newly adopted session prompt should receive edits")
   assert(context.renderer.currentFocusedEditor === otherSession, "the plugin must not steal host focus back across a route change")
+  await cleanup?.()
+}
+
+{
+  // The deferred refocus must re-check its own premise. The microtask runs after
+  // the host's transition, so the route can have moved on in the meantime: the
+  // pending target is then the previous prompt, and focusing it would be a plain
+  // focus steal rather than a workaround.
+  const { layers, context, cleanup } = await setup()
+  const laidOut: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = laidOut
+  vimKey(layers, "i")()
+
+  // Focus flaps onto the collapsed duplicate, which queues the refocus.
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, laidOut)
+  // The user navigates away before the microtask gets its turn.
+  context.ui.router.current = () => ({ type: "session", sessionID: "ses_b" })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(focusCalls === 0, "a prompt from a route the user has left must not be refocused")
+  assert(context.renderer.currentFocusedEditor === collapsed, "the plugin must leave focus where the new route put it")
+  await cleanup?.()
+}
+
+{
+  // Same re-check for the plugin's own state: if Vim is switched off while the
+  // refocus is pending, the plugin no longer owns the prompt and must not move
+  // focus at all.
+  const { layers, context, cleanup } = await setup()
+  const laidOut: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [laidOut, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = laidOut
+  vimKey(layers, "i")()
+
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, laidOut)
+  // The user toggles Vim off before the microtask gets its turn.
+  const toggle = layers.flatMap((layer) => layer.commands ?? []).find((command: any) => command.id === "ocv-plugin.toggle")
+  toggle.run()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(focusCalls === 0, "a disabled plugin must not refocus the prompt")
+  await cleanup?.()
+}
+
+{
+  // Prompt identity on its own, not just the route: navigate away and back inside
+  // the microtask window and the route key matches again, but the plugin has
+  // adopted a different renderable for the prompt in the meantime. A refocus
+  // queued for the old one is stale and must not fire.
+  const { layers, context, cleanup } = await setup()
+  const first: any = fakeTextarea()
+  const second: any = fakeTextarea()
+  const third: any = fakeTextarea()
+  const collapsed: any = fakeTextarea()
+  collapsed.width = 0
+  collapsed.height = 0
+  let focusCalls = 0
+  for (const editor of [first, second, third, collapsed]) {
+    editor.focus = () => {
+      focusCalls += 1
+      const previous = context.renderer.currentFocusedEditor
+      if (previous === editor) return
+      context.renderer.currentFocusedEditor = editor
+      context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, editor, previous)
+    }
+  }
+  context.renderer.currentFocusedEditor = first
+  vimKey(layers, "i")()
+
+  // Flap onto the collapsed duplicate queues a refocus onto `first`.
+  context.renderer.currentFocusedEditor = collapsed
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, collapsed, first)
+  // The user leaves and comes back before the microtask gets its turn, so the
+  // plugin adopts a different renderable for the same prompt key.
+  context.ui.router.current = () => ({ type: "session", sessionID: "ses_b" })
+  context.renderer.currentFocusedEditor = second
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, second, collapsed)
+  vimKey(layers, "i")()
+  context.ui.router.current = () => ({ type: "home" })
+  context.renderer.currentFocusedEditor = third
+  context.renderer.emit(CliRenderEvents.FOCUSED_EDITOR, third, second)
+  vimKey(layers, "i")()
+  // The host is between renderables when the microtask runs, so only the prompt
+  // identity check can stop the stale refocus.
+  context.renderer.currentFocusedEditor = null
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert(focusCalls === 0, "a refocus queued for a superseded renderable must not fire")
   await cleanup?.()
 }
 

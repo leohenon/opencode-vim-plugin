@@ -314,7 +314,7 @@ export function createPromptVim(
 ) {
   let lastPromptEditor: TextareaLike | undefined
   let lastPromptKey: string | undefined
-  let refocusingPrompt = false
+  let refocusQueued = false
   let onPromptEditorChange = (_previous: TextareaLike | undefined) => {}
   let onPromptClear = () => {}
   let disposed = false
@@ -329,23 +329,30 @@ export function createPromptVim(
     pasteTail = undefined
   }
 
+  // Which prompt the user is on. Two renderables can share one key, which is what
+  // the focus workaround below keys off.
+  function currentPromptKey() {
+    const route = context.ui.router.current()
+    if (route.type !== "home" && route.type !== "session") return
+    return route.type === "session" ? `session:${route.sessionID}` : "home"
+  }
+
   function currentPromptEditor() {
     // Dialogs and menus push non-base keymap modes.
     if (context.keymap.mode.current() !== "base") return
-    const route = context.ui.router.current()
-    if (route.type !== "home" && route.type !== "session") return
-    const key = route.type === "session" ? `session:${route.sessionID}` : "home"
+    const key = currentPromptKey()
+    if (!key) return
     let editor = context.renderer.currentFocusedEditor
     if (!isTextareaLike(editor)) return
     if (editor.focused === false) return
-    // OpenCode can mount two prompt renderables for the same prompt (seen on the
-    // new-session route) and flap focus onto the collapsed, zero-size duplicate.
-    // The native block cursor follows the focused renderable, so it lands on the
-    // invisible one and disappears; the switches also churn Vim state. When focus
-    // is on a collapsed renderable but the laid-out one for this same prompt is
-    // known, keep using it and pull focus back so the cursor and Vim stay put.
+    // Workaround for host behavior: OpenCode can mount two prompt renderables
+    // for the same prompt (seen on the new-session route) and flap focus onto the
+    // collapsed, zero-size duplicate. The native block cursor follows the focused
+    // renderable, so it lands on the invisible one and disappears; the switches
+    // also churn Vim state. When focus is on a collapsed renderable but the
+    // laid-out one for this same prompt is known, keep using it and pull focus
+    // back so the cursor and Vim stay put.
     if (
-      !refocusingPrompt &&
       (editor.width <= 0 || editor.height <= 0) &&
       key === lastPromptKey &&
       lastPromptEditor &&
@@ -354,12 +361,9 @@ export function createPromptVim(
       lastPromptEditor.width > 0 &&
       lastPromptEditor.height > 0
     ) {
-      refocusingPrompt = true
-      try {
-        lastPromptEditor.focus()
-      } finally {
-        refocusingPrompt = false
-      }
+      // Keep using the laid-out renderable for this call so Vim state and the
+      // cursor stay put, and ask for focus to follow once the host is done.
+      queuePromptRefocus(lastPromptEditor, key)
       return lastPromptEditor
     }
     if (editor !== lastPromptEditor) {
@@ -370,6 +374,42 @@ export function createPromptVim(
       onPromptEditorChange(previous)
     }
     return editor
+  }
+
+  // FOCUSED_EDITOR is emitted from inside the host's own changeFocus, so calling
+  // focus() there re-enters changeFocus mid-transition and leaves the host
+  // pointing at the collapsed renderable. Whatever takes focus next then types
+  // into an invisible 0x0 buffer: with the @ or / autocomplete popup open,
+  // keystrokes vanish and Enter submits text the prompt never showed. Defer past
+  // the current transition and re-check, so a host that already moved focus back
+  // on its own is left alone.
+  //
+  // Nothing here may read or write host keymap or focus state synchronously: a
+  // host call that re-enters the keymap or the focus transition breaks the same way.
+  // The microtask is outside the emit, so it can re-read the host state to confirm
+  // this is still the same prompt the plugin is serving.
+  function queuePromptRefocus(target: TextareaLike, key: string) {
+    if (refocusQueued) return
+    refocusQueued = true
+    queueMicrotask(() => {
+      refocusQueued = false
+      if (disposed) return
+      // The route may have changed and a new prompt adopted since this was queued.
+      // Focusing the previous prompt then would be a plain focus steal, not a
+      // workaround, so both the prompt identity and the route must still match.
+      if (lastPromptEditor !== target) return
+      if (currentPromptKey() !== key) return
+      // Vim may have been turned off while this was pending.
+      if (!input.enabled()) return
+      if (target.isDestroyed) return
+      if (target.width <= 0 || target.height <= 0) return
+      const focused = context.renderer.currentFocusedEditor as TextareaLike | undefined
+      if (focused === target) return
+      // Only pull focus back off a collapsed renderable; anything else that
+      // legitimately took focus in the meantime (a panel, the popup) stays put.
+      if (focused && (focused.width ?? 0) > 0 && (focused.height ?? 0) > 0) return
+      target.focus()
+    })
   }
 
   function promptEditor() {
