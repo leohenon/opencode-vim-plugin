@@ -16,7 +16,7 @@ For OpenCode 2.0.25 or newer:
 opencode plugin add @leohenon/opencode-vim-plugin
 ```
 
-> **OpenCode v1:** use plugin `0.1.6`. See the [v1](https://github.com/leohenon/opencode-vim-plugin/tree/v1#installation).
+> **OpenCode v1:** use plugin `0.1.6`. See [v1](https://github.com/leohenon/opencode-vim-plugin/tree/v1#installation).
 
 ## Usage
 
