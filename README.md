@@ -2,23 +2,21 @@
 
 # OpenCode Vim Plugin
 
-[![OpenCode v1](https://img.shields.io/badge/OpenCode%20v1-v0.1.6-007ec6?style=flat-square&logo=npm&logoColor=white)](https://github.com/leohenon/opencode-vim-plugin/tree/v1#installation) [![OpenCode v2](https://img.shields.io/npm/v/@leohenon/opencode-vim-plugin/beta?label=OpenCode%20v2&style=flat-square&logo=npm&logoColor=white&color=007ec6)](https://www.npmjs.com/package/@leohenon/opencode-vim-plugin?activeTab=versions) [![Website](https://img.shields.io/badge/website-opencode--vim-7fa6a3?style=flat-square)](https://leohenon.github.io/opencode-vim/)
+[![OpenCode v2](https://img.shields.io/npm/v/@leohenon/opencode-vim-plugin/latest?label=OpenCode%20v2&style=flat-square&logo=npm&logoColor=white&color=007ec6)](https://www.npmjs.com/package/@leohenon/opencode-vim-plugin?activeTab=versions) [![OpenCode v1](https://img.shields.io/badge/OpenCode%20v1-v0.1.6-007ec6?style=flat-square&logo=npm&logoColor=white)](https://github.com/leohenon/opencode-vim-plugin/tree/v1#installation) [![Website](https://img.shields.io/badge/website-opencode--vim-7fa6a3?style=flat-square)](https://leohenon.github.io/opencode-vim/)
 
 Adds Vim editing to the OpenCode prompt, including motions, operators, text objects, registers, visual mode, counts, undo/redo, and dot repeat.
 
 </div>
-
-> [!NOTE]
-> `main` targets OpenCode v2. For OpenCode v1, use plugin version `0.1.6`; see the [v1 installation instructions](https://github.com/leohenon/opencode-vim-plugin/tree/v1#installation). Maintenance fixes belong on the `v1` branch.
-> Use npm’s `@beta` channel for v2 prereleases.
 
 ## Installation
 
 For OpenCode 2.0.25 or newer:
 
 ```bash
-opencode plugin add @leohenon/opencode-vim-plugin@beta
+opencode plugin add @leohenon/opencode-vim-plugin
 ```
+
+> **OpenCode v1:** use plugin `0.1.6`. See the [v1](https://github.com/leohenon/opencode-vim-plugin/tree/v1#installation).
 
 ## Usage
 
@@ -26,7 +24,7 @@ Toggle via command palette > `Toggle vim mode` or slash command `/vim`.
 
 ## Prompt controls
 
-> Unicode word boundaries are not yet supported.
+> Unicode word boundaries are not supported.
 
 | Category                       | Keys                                                                                                    |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------- |
@@ -78,7 +76,7 @@ Configure the plugin in `cli.json`, OpenCode v2's TUI configuration file:
 {
   "plugins": [
     {
-      "package": "@leohenon/opencode-vim-plugin@beta",
+      "package": "@leohenon/opencode-vim-plugin",
       "options": {
         "enabled": true,
         "toggle_key": "ctrl+shift+v",
@@ -91,6 +89,8 @@ Configure the plugin in `cli.json`, OpenCode v2's TUI configuration file:
   ]
 }
 ```
+
+Unless marked as top-level `cli.json` settings, the examples below go inside the plugin's `options` object.
 
 ### Options
 
@@ -120,15 +120,7 @@ Vim mode starts in insert mode by default. To start in normal mode instead, use:
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "enabled": true,
-        "vim_initial_mode": "normal"
-      }
-    }
-  ]
+  "vim_initial_mode": "normal"
 }
 ```
 
@@ -138,22 +130,15 @@ Bind existing OpenCode commands only in Vim normal mode:
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "normal_keybinds": {
-          "<leader>s": "session.list",
-          "j": "session.line.down",
-          "k": "session.line.up"
-        }
-      }
-    }
-  ]
+  "normal_keybinds": {
+    "<leader>s": "session.list",
+    "j": "session.line.down",
+    "k": "session.line.up"
+  }
 }
 ```
 
-`<leader>` in a keybind is resolved by OpenCode itself, so set the host `leader` keybind in `cli.json`:
+`<leader>` in a keybind is resolved by OpenCode itself, so configure it in the top-level `keybinds` object in `cli.json`:
 
 ```json
 {
@@ -179,20 +164,13 @@ Nested normal-mode keybind configuration is also accepted inside the plugin opti
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "keybinds": {
-          "vim.normal": {
-            "session_list": "<leader>s",
-            "messages_line_up": "<leader>k",
-            "messages_line_down": "<leader>j"
-          }
-        }
-      }
+  "keybinds": {
+    "vim.normal": {
+      "session_list": "<leader>s",
+      "messages_line_up": "<leader>k",
+      "messages_line_down": "<leader>j"
     }
-  ]
+  }
 }
 ```
 
@@ -204,14 +182,7 @@ To submit from insert mode too:
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "vim_enter_submit": true
-      }
-    }
-  ]
+  "vim_enter_submit": true
 }
 ```
 
@@ -219,14 +190,7 @@ To always default to insert mode after a prompt submission:
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "vim_insert_after_submit": true
-      }
-    }
-  ]
+  "vim_insert_after_submit": true
 }
 ```
 
@@ -240,7 +204,7 @@ To keep newline available when `vim_enter_submit` is enabled, configure OpenCode
 }
 ```
 
-Or configure a separate OpenCode submit key:
+Or configure a separate OpenCode submit key in top-level `cli.json` settings:
 
 ```json
 {
@@ -258,14 +222,7 @@ Use the system clipboard as Vim's register:
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "vim_system_clipboard_register": true
-      }
-    }
-  ]
+  "vim_system_clipboard_register": true
 }
 ```
 
@@ -282,19 +239,12 @@ Map non-English keyboard layout characters to Vim command keys.
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "vim_langmap": {
-          "р": "h",
-          "о": "j",
-          "л": "k",
-          "д": "l"
-        }
-      }
-    }
-  ]
+  "vim_langmap": {
+    "р": "h",
+    "о": "j",
+    "л": "k",
+    "д": "l"
+  }
 }
 ```
 
@@ -302,17 +252,10 @@ Or for simple aliases:
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "vim_langmap": {
-          "H": "^",
-          "L": "$"
-        }
-      }
-    }
-  ]
+  "vim_langmap": {
+    "H": "^",
+    "L": "$"
+  }
 }
 ```
 
@@ -322,36 +265,22 @@ Set a two-character sequence to leave insert mode without pressing Escape:
 
 ```json
 {
-  "plugins": [
-    {
-      "package": "@leohenon/opencode-vim-plugin@beta",
-      "options": {
-        "vim_escape_sequence": "jk"
-      }
-    }
-  ]
+  "vim_escape_sequence": "jk"
 }
 ```
+
+## Troubleshooting
+
+If `Esc` feels delayed in tmux, add `set -s escape-time 10` to `~/.tmux.conf` to reduce tmux’s key-sequence timeout.
 
 ## Want more?
 
 This plugin covers the prompt only. For Vim controls across the whole TUI - copy mode, session navigation - see [OpenCode Vim](https://github.com/leohenon/opencode-vim), a fork of OpenCode v1 that this plugin shares its Vim core with.
-
-## Troubleshooting
-
-### tmux
-
-If `Esc` feels delayed in tmux, add `set -s escape-time 10` to `~/.tmux.conf` to reduce tmux’s key-sequence timeout.
 
 ## Local development
 
 ```bash
 bun install
 bun run check
-```
-
-Launch a local installed OpenCode v2 test workspace (uses `opencode`; set `OPENCODE_BIN` to point elsewhere):
-
-```bash
-./script/test-installed.sh
+bun run dev
 ```
