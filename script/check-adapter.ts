@@ -1570,6 +1570,44 @@ for (const options of [
   await cleanup?.()
 }
 
+for (const newestFirst of [false, true]) {
+  const { layers, keymapState, context, slots, cleanup } = await setup()
+  const editor: any = fakeTextarea()
+  context.renderer.currentFocusedEditor = editor
+  vimKey(layers, "h")()
+  const footer = slots.find((claim) => claim.append === "prompt.footer.status")
+  const mounts = [footer, footer.mount()]
+  if (newestFirst) mounts.reverse()
+  const comma = () => {
+    const event = new KeyEvent({
+      name: ",", sequence: ",", raw: ",", ctrl: false, meta: false, shift: false,
+      option: false, number: false, eventType: "press", source: "raw",
+    })
+    context.renderer.keyInput.emit("keypress", event)
+    return event
+  }
+
+  keymapState.mode = "autocomplete"
+  assert(comma().defaultPrevented, "stale autocomplete should let Vim handle comma")
+  mounts[0].dispose()
+  assert(comma().defaultPrevented, "unmounting one footer must preserve ownership for the surviving footer")
+  assert(vimKey(layers, "h", "autocomplete")() !== false, "the surviving footer's keys must still reach Vim")
+
+  mounts[1].dispose()
+  assert(!layers.some((layer) => layer.priority === 100), "the last footer should release all prompt keymap layers")
+  assert(!comma().defaultPrevented, "the last footer must clear cached stale-mode ownership")
+  keymapState.commands = [{ id: "prompt.autocomplete.select" }]
+  assert(!comma().defaultPrevented, "a live popup must own comma when no footer can update the cache")
+
+  const remounted = footer.mount()
+  assert(!comma().defaultPrevented, "a remounted footer must still yield to a live popup")
+  keymapState.commands = []
+  assert(comma().defaultPrevented, "a remounted footer must recover stale-mode ownership")
+  remounted.dispose()
+  assert(!comma().defaultPrevented, "unmounting the remounted footer must clear ownership again")
+  await cleanup?.()
+}
+
 for (const dialogOpen of [false, true]) {
   const { layers, context, cleanup } = await setup()
   const editors: any[] = [fakeTextarea(), fakeTextarea()]

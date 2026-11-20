@@ -354,6 +354,14 @@ export function createPromptVim(
   // this cache. The default assumes the host owns the keys, matching the old
   // behavior, so setup that has not run yet can never hand the keys back.
   let autocompleteStale = false
+  let keymapMounts = 0
+
+  function mountKeymap() {
+    keymapMounts++
+    return () => {
+      if (--keymapMounts === 0) autocompleteStale = false
+    }
+  }
 
   function autocompleteCommandsReachable() {
     try {
@@ -907,6 +915,7 @@ export function createPromptVim(
     isVisualLine: state.isVisualLine,
     mode: state.mode,
     setMode: state.setMode,
+    mountKeymap,
     keymapMode,
     vimCommands,
   }

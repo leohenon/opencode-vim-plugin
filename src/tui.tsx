@@ -358,6 +358,7 @@ function KeymapSetup(props: {
   toggle: () => void
 }) {
   const { context, options, prompt, toggle } = props
+  onCleanup(prompt.mountKeymap())
   onMount(prompt.applyCursorStyle)
   // Only a mode change should rebuild these layers. Older hosts rebuild commands()
   // on every layer registration, so reading it directly in a factory loops forever.
